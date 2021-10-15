@@ -1,0 +1,223 @@
+import json
+import os
+import numpy as np
+imagepaths, labels=[],[]
+for dirname, _, filenames in os.walk('./FVROI_test/Train'):    
+    for filename in filenames:
+        
+        label = int(filename[1:3])-1
+        imagepaths.append(os.path.join(dirname, filename))
+        labels.append(label)
+        
+print(imagepaths[0])
+print(labels)
+
+data={}
+data['imagepaths']=imagepaths
+data['labels'] = labels
+dataset_class=len(np.unique(labels))
+print('Dataset Classes: {}'.format(dataset_class))
+
+with open('./dataset/database/data_FVROI_test.json', 'w', newline='') as jsonfile:
+    json.dump(data, jsonfile)
+    
+    
+    import torch
+import numpy as np
+import PIL.Image as Image
+import torchvision.transforms.functional as FT
+from torchvision import transforms
+
+#mytransform=transforms.Compose([
+#        transforms.Resize((28,28)),
+#        transforms.ToTensor(),
+#        ])
+def my_collate(batch):
+    data, target = list(), list()
+    for b in batch:
+        data.append(b[0])
+        target.append(b[1])
+    data = torch.stack(data,dim=0)
+    target = torch.stack(target,dim=0)
+    return data, target
+
+class MyDataset_FV(torch.utils.data.Dataset):
+    '''
+    load the dataset
+    '''
+    def __init__(self,transforms):
+        with open('./dataset/database/data_FVROI_test.json') as jsonfile:
+            data_load = json.load(jsonfile)
+        self.imList = data_load['imagepaths']
+        self.labelList = data_load['labels']
+        self.transforms=transforms
+        print('number of total data:{}'.format(len(self.imList)))
+    def __len__(self):
+        return len(self.imList)
+
+    def __getitem__(self, idx):
+        '''
+        :param idx: Index of the image file
+        :return: returns the image and corresponding label file.
+        '''
+        image_name = self.imList[idx]
+        label = self.labelList[idx]
+        
+        # read image with PIL module
+        image = Image.open(image_name, mode='r')
+        image = image.convert('L')    # Gray
+        
+        # Convert PIL label image to torch.Tensor
+        image = self.transforms(image)
+        label = torch.tensor(label)
+        return image, label
+
+#if __name__ == "__main__":
+#    mytransform = transforms.Compose([
+#            transforms.Resize((28,28)),
+#            transforms.ToTensor()
+#            ])
+#    mydataset = MyDataset_FV(transforms=mytransform)
+#    mydata_loader = torch.utils.data.DataLoader(mydataset, batch_size=30, num_workers=0,  collate_fn = my_collate)
+#    for data in mydata_loader:
+#        print(data[0].size())
+#        print(data[1].size())
+#        break    
+
+import warnings
+warnings.filterwarnings("ignore")
+import matplotlib.pyplot as plt
+from torchvision import datasets, transforms
+import PIL.Image as Image
+import torch.nn as nn
+import torch.nn.functional as F
+import torch
+from torch import optim
+import numpy as np
+
+# 步驟0. 是否使用CUDA 
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1" 
+use_cuda = 1
+device = torch.device("cuda" if (torch.cuda.is_available() & use_cuda) else "cpu")
+device = torch.device("cpu")
+print(device)
+# 步驟1. data loader處理 
+mytransform = transforms.Compose([
+            transforms.Resize((28,28)),
+            transforms.ToTensor()
+            ])
+
+dataset_train = MyDataset_FV(transforms=mytransform)
+# dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=13, num_workers=0, shuffle=False, collate_fn = my_collate)
+dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=30, num_workers=0, shuffle=False, collate_fn = my_collate)
+
+
+use_cuda = 1
+device = torch.device("cuda" if (torch.cuda.is_available() & use_cuda) else "cpu")
+class ConvM(nn.Sequential):
+    def __init__(self, in_planes, out_planes, kernel_size=3, stride=1, groups=1):
+        padding = (kernel_size - 1) // 2
+        norm_layer = nn.BatchNorm2d
+        super(ConvM, self).__init__(
+            nn.Conv2d(in_planes, out_planes, kernel_size, stride, padding, groups=groups, bias=False),
+            norm_layer(out_planes),
+            nn.ReLU(inplace=True),
+        )
+class ConvNet(nn.Module):
+    def __init__(self, n_class=3):
+        super(ConvNet, self).__init__()
+        
+        self.conv = nn.Sequential(
+            ConvM(1, 32, 5, 2),
+            ConvM(32, 64, 5, 2),
+            ConvM(64, 128, 3, 1),
+            ConvM(128, 64, 3, 1),
+            ConvM(64, 32, 3, 1),
+        )        
+        self.fc = nn.Linear(32, n_class)
+    def forward(self, x):
+        x = self.conv(x)
+        x = nn.functional.adaptive_avg_pool2d(x, 1).reshape(x.shape[0], -1)
+        ft = x
+        output = self.fc(x)
+        return output
+
+# initialize the ConvNet
+model_cnn = ConvNet(n_class=dataset_class).to(device)
+
+# 步驟3. loss function宣告
+loss = torch.nn.CrossEntropyLoss().to(device)
+
+# 步驟4. optimator宣告
+optimizer_cnn = optim.Adam(model_cnn.parameters(), lr=0.01)
+
+
+#dummy_input = torch.rand(1,1,28,28)  # 1 x input channel x height x width
+#out = model_cnn(dummy_input)  
+#torch.onnx.export(model_cnn, dummy_input, './MyCNNNet.onnx')
+
+
+# 步驟5. CNN模型開始訓練
+total_epoch=100
+plt_loss_train_cnn=[]
+for epoch in range(total_epoch):
+    # train
+    model_cnn.train()
+    train_loss_cnn = 0
+    for batch_idx, (data, target) in enumerate(dataloader_train):
+        data, target = data.to(device), target.to(device)
+        # MLP
+        optimizer_cnn.zero_grad()
+        output_cnn = model_cnn(data)
+        loss_cnn = loss(output_cnn,target)  
+        train_loss_cnn += loss_cnn
+        loss_cnn.backward()
+        optimizer_cnn.step()
+    train_loss_cnn /= len(dataloader_train.dataset)
+    plt_loss_train_cnn.append(train_loss_cnn)
+   
+    if epoch % 10 ==0:
+        print('CNN[epoch: {}/{}], Average loss (Train):{:.10f}'.format(
+            epoch+1, total_epoch, train_loss_cnn))
+print('CNN[epoch: {}/{}], Average loss (Train):{:.10f}'.format(
+            epoch+1, total_epoch, train_loss_cnn))
+print('training done.')
+
+
+plt.plot(torch.stack(plt_loss_train_cnn).detach().numpy())
+plt.title('training loss')
+plt.show()
+
+#mytransform = transforms.Compose([
+#        transforms.Resize((28,28)),
+#        transforms.ToTensor()
+#        ])
+
+model_cnn.eval() 
+
+#image_names = ['./FVROI_test/Test/F0310.bmp',
+#               './FVROI_test/Test/F0210.bmp',
+#              './FVROI_test/Test/F0110.bmp']
+#list_class = ['F01','F02','F03']
+
+image_names = ['./FVROI_test/Test/F'+str(i).zfill(2)+'10.bmp' for i in range(1,dataset_class+1)]
+list_class = ['F'+str(i).zfill(2) for i in range(1,dataset_class+1)]
+
+for image_name in image_names:
+    image = Image.open(image_name, mode='r').convert('RGB')
+    plt.imshow(image)
+    plt.show()
+    
+    image = image.convert('L')
+    
+    image = mytransform(image)
+    print(image.shape)
+    with torch.no_grad():
+
+        output_cnn = model_cnn(torch.unsqueeze(image,dim=0).to(device))
+    output_cnn= F.softmax(output_cnn)
+
+    
+    print('*'*50)    
+    for i, tmp_out in enumerate(output_cnn[0]):
+        print('CNN: probability for {}: {:.4f}%'.format(list_class[i], tmp_out*100))
